@@ -4,97 +4,124 @@ import QtQuick.Layouts
 
 ApplicationWindow {
     visible: true
-    width: 1024
-    height: 768
-    title: "Extenly Surveillance - Phase 1"
-    color: "#1e1e1e" // Dark background
+    width: 1280
+    height: 720
+    title: "Extenly Surveillance - Phase 3 (Motion)"
+    color: "#1e1e1e"
 
-    ColumnLayout {
-        anchors.fill: parent
-        anchors.margins: 20
-        spacing: 10
+    // Component: Camera Tile
+    component CameraTile: Rectangle {
+        property string camName: "Camera"
+        property string streamId: "cam1"
+        property color statusColor: "#00FF00"
 
-        // Header
-        Text {
-            text: "Camera Feed 01"
-            color: "#ffffff"
-            font.pixelSize: 24
-            font.bold: true
-            Layout.alignment: Qt.AlignHCenter
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+        color: "black"
+        border.color: "#333"
+        border.width: 1
+        radius: 4
+        clip: true
+
+        Image {
+            id: imgDisplay
+            anchors.fill: parent
+            anchors.margins: 2
+            fillMode: Image.PreserveAspectFit
+            cache: false
+            source: "image://live/" + streamId
         }
 
-        // Video Container
+        // Title Overlay
         Rectangle {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            color: "black"
-            border.color: "#444"
-            border.width: 2
-            radius: 5
-
-            Image {
-                id: liveFeed
-                anchors.fill: parent
-                fillMode: Image.PreserveAspectFit
-                cache: false // CRITICAL: Do not cache, or video won't update
-                
-                // Initial source
-                source: "image://live/cam1"
-            }
-
-            // Overlay Text (FPS or Status)
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.margins: 8
+            width: lblObj.width + 16
+            height: 24
+            color: "#80000000"
+            radius: 4
             Text {
-                anchors.top: parent.top
-                anchors.left: parent.left
-                anchors.margins: 10
-                text: "LIVE"
-                color: "red"
+                id: lblObj
+                anchors.centerIn: parent
+                text: camName
+                color: "white"
+                font.pixelSize: 12
                 font.bold: true
-                font.pixelSize: 16
-                
-                Rectangle {
-                    anchors.fill: parent
-                    anchors.margins: -4
-                    color: "black"
-                    opacity: 0.5
-                    z: -1
-                }
             }
         }
+        
+        // Status Dot
+        Rectangle {
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: 10
+            width: 10
+            height: 10
+            radius: 5
+            color: statusColor
+            border.color: "white"
+            border.width: 1
+        }
 
-        // Footer Controls
-        RowLayout {
-            Layout.alignment: Qt.AlignHCenter
-            spacing: 20
-
-            Button {
-                text: "Quit"
-                onClicked: Qt.quit()
-                contentItem: Text {
-                    text: parent.text
-                    color: "white"
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                }
-                background: Rectangle {
-                    color: parent.down ? "#d32f2f" : "#b71c1c"
-                    radius: 5
-                }
-            }
+        Timer {
+            interval: 30
+            running: true
+            repeat: true
+            onTriggered: imgDisplay.source = "image://live/" + streamId + "?ts=" + Math.random()
         }
     }
 
-    // The Refresh Loop
-    // QML Image elements are static by default. 
-    // This timer forces the Image to reload from the C++ provider every 30ms.
-    Timer {
-        interval: 30
-        running: true
-        repeat: true
-        onTriggered: {
-            // We append a random number (or timestamp) to the URL.
-            // This tricks QML into thinking it's a new image source.
-            liveFeed.source = "image://live/cam1?ts=" + Math.random()
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 0
+
+        // Header
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 50
+            color: "#252525"
+            border.color: "#333"
+            border.width: 1
+            Text {
+                anchors.centerIn: parent
+                text: "SECURITY COMMAND CENTER - MOTION ACTIVE"
+                color: "#ff4444" // Red text to show alert status
+                font.letterSpacing: 2
+                font.bold: true
+            }
+        }
+
+        // Grid
+        GridLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            columns: 2
+            columnSpacing: 10
+            rowSpacing: 10
+            anchors.margins: 10
+
+            // Cam 1 is now the Motion Detector
+            CameraTile { 
+                camName: "Entrance (Motion Detection)"; 
+                streamId: "cam1"
+                statusColor: "red" 
+            }
+
+            CameraTile { 
+                camName: "Parking (Night)"; 
+                streamId: "cam2" 
+                statusColor: "#00FF00"
+            }
+            CameraTile { 
+                camName: "Lobby (Mirror)"; 
+                streamId: "cam3" 
+            }
+            CameraTile { 
+                camName: "Privacy (Blurred)"; 
+                streamId: "cam4"
+                statusColor: "orange"
+            }
         }
     }
 }

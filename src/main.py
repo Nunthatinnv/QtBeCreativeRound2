@@ -1,7 +1,8 @@
 import sys
 import argparse
 import cv2
-from PySide6.QtCore import QTimer, Qt, QObject, Signal, QSize
+import numpy as np
+from PySide6.QtCore import QTimer, Qt, QObject, Signal, Slot
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 from PySide6.QtQml import QQmlApplicationEngine
@@ -9,164 +10,152 @@ from PySide6.QtQuick import QQuickImageProvider
 
 class OpencvImageProvider(QQuickImageProvider):
     """
-    This class acts as a bridge. QML asks this class for an image 
-    by URL (e.g., "image://live/cam1"), and this class returns the latest frame.
+    Standard Image Provider (Same as Phase 2)
     """
     def __init__(self):
         super().__init__(QQuickImageProvider.Image)
-        self.current_image = None
-        # Create a black placeholder image initially
-        self.current_image = QImage(640, 480, QImage.Format_RGB888)
-        self.current_image.fill(Qt.black)
+        self.streams = {}
+        # Init black frames
+        empty_image = QImage(640, 480, QImage.Format_RGB888)
+        empty_image.fill(Qt.black)
+        for i in range(1, 5):
+            self.streams[f"cam{i}"] = empty_image
 
     def requestImage(self, id, size, requestedSize):
-        """
-        Standard QQuickImageProvider method. 
-        Called by QML when it needs a new frame.
-        
-        PySide6 expects a QImage to be returned (not a tuple).
-        """
-        if self.current_image:
-            return self.current_image
-        
-        return QImage()
+        clean_id = id.split('?')[0]
+        if clean_id in self.streams:
+            return self.streams[clean_id]
+        return self.streams.get("cam1")
 
-    def update_image(self, cv_frame):
-        """
-        Converts the raw OpenCV frame (BGR) to a QImage (RGB) 
-        and stores it for the next request.
-        """
+    def update_image(self, stream_id, cv_frame):
         try:
-            # 1. Convert BGR (OpenCV) to RGB (Qt)
             rgb_frame = cv2.cvtColor(cv_frame, cv2.COLOR_BGR2RGB)
-            
-            # 2. Get dimensions
             h, w, ch = rgb_frame.shape
-            bytes_per_line = ch * w
-            
-            # 3. Create QImage (Must copy to keep it safe in memory)
-            self.current_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
+            img = QImage(rgb_frame.data, w, h, ch * w, QImage.Format_RGB888).copy()
+            self.streams[stream_id] = img
         except Exception as e:
-            print(f"Error converting image: {e}")
+            pass
+
+class MotionDetector:
+    """
+    The 'Watchdog'. Compares current frame vs previous frame.
+    """
+    def __init__(self):
+        self.prev_frame = None
+        self.min_area = 1000  # Sensitivity: smaller = more sensitive
+
+    def process(self, frame):
+        """
+        Returns: (frame_with_boxes, is_motion_detected)
+        """
+        # 1. Prepare frame (Gray + Blur to remove noise)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (21, 21), 0)
+
+        # Initialize previous frame if first run
+        if self.prev_frame is None:
+            self.prev_frame = gray
+            return frame, False
+
+        # 2. Compute Difference (Absolute Difference)
+        # diff = |Current - Previous|
+        frame_delta = cv2.absdiff(self.prev_frame, gray)
+        thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
+        
+        # Dilate to fill in holes
+        thresh = cv2.dilate(thresh, None, iterations=2)
+        
+        # 3. Find Contours (Shapes)
+        contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        motion_found = False
+        
+        # Work on a copy so we don't ruin the original if needed elsewhere
+        annotated_frame = frame.copy()
+
+        for c in contours:
+            # Ignore small movements (wind, noise)
+            if cv2.contourArea(c) < self.min_area:
+                continue
+            
+            motion_found = True
+            
+            # 4. Draw Red Box
+            (x, y, w, h) = cv2.boundingRect(c)
+            cv2.rectangle(annotated_frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
+            cv2.putText(annotated_frame, "MOTION DETECTED", (10, 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+        # Update previous frame for next loop
+        # Note: In a real security system, we might update 'prev_frame' 
+        # less frequently to detect slow movers.
+        self.prev_frame = gray
+        
+        return annotated_frame, motion_found
 
 class VideoController(QObject):
-    """
-    Controls the camera logic (Start/Stop/Capture)
-    """
-    def __init__(self, provider, camera_index: int = 0):
+    def __init__(self, provider, camera_index=0):
         super().__init__()
         self.provider = provider
-        self.camera_index = camera_index
-        # allow caller to pick camera index
-        self.cap = cv2.VideoCapture(camera_index)  # 0 = Default Webcam
+        self.cap = cv2.VideoCapture(camera_index)
         
-        if not self.cap.isOpened():
-            print(f"Warning: failed to open camera index {camera_index}")
+        # Initialize our Watchdog
+        self.detector = MotionDetector()
         
-        # Track if we've warned about black frames (for WiFi/virtual cams like Camo)
-        self.black_frame_count = 0
-        self.warned_about_black = False
-        
-        # Setup the "Game Loop" timer
         self.timer = QTimer()
-        self.timer.setInterval(30) # 30ms ~ 33 FPS
-        self.timer.timeout.connect(self.next_frame)
+        self.timer.setInterval(30)
+        self.timer.timeout.connect(self.game_loop)
         self.timer.start()
 
-    def next_frame(self):
-        if not self.cap or not self.cap.isOpened():
-            # avoid repeated noisy prints; just return early
-            return
+    def game_loop(self):
+        if not self.cap.isOpened(): return
+
         ret, frame = self.cap.read()
         if ret:
-            # Check if frame is all black (common with WiFi/virtual cameras like Camo)
-            if frame.max() < 10:
-                self.black_frame_count += 1
-                if not self.warned_about_black and self.black_frame_count > 30:
-                    print(f"\nCamera {self.camera_index} is sending black frames.")
-                    print("   If using Camo Studio: Make sure the phone app is connected and streaming")
-                    print("   If using another WiFi webcam: Check that the app is running and connected\n")
-                    self.warned_about_black = True
-            else:
-                # Reset warning if we start getting real frames
-                self.black_frame_count = 0
-                self.warned_about_black = False
+            # Resize for performance (optional, but good for heavy CV)
+            frame = cv2.resize(frame, (640, 480))
+
+            # --- 1. RUN MOTION DETECTION (Cam 1) ---
+            # We process the frame to draw boxes on it
+            motion_frame, has_motion = self.detector.process(frame)
             
-            # Send the frame to the provider
-            self.provider.update_image(frame)
-        else:
-            # Camera read failed - keep this quiet to avoid spam
-            pass
-    
+            # Update Cam 1 (The "Smart" Camera)
+            self.provider.update_image("cam1", motion_frame)
+            
+            # --- 2. SIMULATE OTHER FEEDS ---
+            # Cam 2: Night Vision (We use the CLEAN frame, not the one with red boxes)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            self.provider.update_image("cam2", gray_bgr)
+            
+            # Cam 3: Mirror
+            flipped = cv2.flip(frame, 1)
+            self.provider.update_image("cam3", flipped)
+            
+            # Cam 4: Privacy
+            blurred = cv2.GaussianBlur(frame, (35, 35), 0)
+            self.provider.update_image("cam4", blurred)
+
     def release(self):
-        """Release the camera capture"""
-        if self.cap:
-            self.cap.release()
+        if self.cap: self.cap.release()
 
 if __name__ == "__main__":
-    # minimal CLI: allow listing cameras or selecting camera index
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--list-cameras", action="store_true", help="Probe and list available camera indices then exit")
-    parser.add_argument("--camera", type=int, default=0, help="Camera index to use (default: 0)")
-    parser.add_argument("--backend", type=str, default=None, help="Optional OpenCV backend name to use when probing (used only with --list-cameras)")
-    parser.add_argument("--verbose", action="store_true", help="Verbose output for camera probe")
-    args, unknown = parser.parse_known_args()
+    parser.add_argument("--camera", type=int, default=0)
+    args, _ = parser.parse_known_args()
 
-    # Try to reduce OpenCV backend noise
-    try:
-        # OpenCV >=4.5
-        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
-    except Exception:
-        try:
-            # older OpenCV
-            cv2.setLogLevel(cv2.LOG_LEVEL_ERROR)
-        except Exception:
-            pass
-
-    if args.list_cameras:
-        # import the probe helper from the small utility added in this repo
-        try:
-            from list_cameras import probe_cameras, resolve_backend
-
-            backend = resolve_backend(args.backend)
-            if args.backend and backend is None:
-                print(f"Warning: unknown backend '{args.backend}', ignoring and using default.")
-
-            cams = probe_cameras(max_index=8, timeout=1.0, backend=backend, verbose=args.verbose)
-            if cams:
-                print("Available camera indices:", cams)
-                for c in cams:
-                    print(c)
-                sys.exit(0)
-            else:
-                print("No cameras found")
-                sys.exit(1)
-        except Exception as e:
-            print("Error running camera probe:", e)
-            sys.exit(2)
-
-    # Launch the Qt UI with the selected camera index
     app = QApplication(sys.argv)
     engine = QQmlApplicationEngine()
 
-    # 1. Initialize the Provider
     image_provider = OpencvImageProvider()
-    
-    # 2. Register it so QML can use "image://live/..."
     engine.addImageProvider("live", image_provider)
 
-    # 3. Initialize the Controller (Starts the camera)
     controller = VideoController(image_provider, camera_index=args.camera)
-
-    # Ensure camera is released when the app quits
     app.aboutToQuit.connect(controller.release)
 
-    # 4. Load the UI
     import os
     qml_file = os.path.join(os.path.dirname(__file__), "Main.qml")
     engine.load(qml_file)
 
-    if not engine.rootObjects():
-        sys.exit(-1)
-
+    if not engine.rootObjects(): sys.exit(-1)
     sys.exit(app.exec())
