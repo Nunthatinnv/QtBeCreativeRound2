@@ -1,0 +1,32 @@
+{
+    "cameras": [
+        {
+            "id": "cam1",
+            "name": "Front Door",
+            "source": 0, 
+            "sensitivity": 500,
+            "roi": [0.2, 0.5, 0.8, 0.5]
+        },
+        {
+            "id": "cam2",
+            "name": "Backyard",
+            "source": 0,
+            "sensitivity": 1000,
+            "roi": []
+        },
+        {
+            "id": "cam3",
+            "name": "Garage (IP)",
+            "source": "testing_video/walking.mp4",
+            "sensitivity": 800,
+            "roi": [0.5, 0, 0.5, 1]
+        },
+        {
+            "id": "cam4",
+            "name": "Living Room",
+            "source": "testing_video/video.mp4",
+            "sensitivity": 1000,
+            "roi": []
+        }
+    ]
+}
