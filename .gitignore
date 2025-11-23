@@ -3,3 +3,4 @@ src/list_cameras.py
 src/test_camera.py
 snapshots
 alert_log.csv
+venv/
